@@ -1,0 +1,52 @@
+# Build directories
+/build/
+/city-designer/build/
+
+# CMake generated files
+/CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+install_manifest.txt
+
+# Binaries
+/bin/
+/city-designer/build/bin/
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Object files
+*.o
+*.obj
+*.lo
+*.la
+
+# IDE / Editor folders
+.vscode/
+.idea/
+*.code-workspace
+
+# macOS
+.DS_Store
+
+# Visual Studio
+*.sln
+*.vcxproj*
+*.vcxproj.filters
+*.suo
+ipch/
+*.VC.db
+
+# vcpkg (common folders to ignore if used locally)
+/vcpkg_installed/
+/buildtrees/
+/packages/
+
+# Logs
+*.log
+
+# Generated asset copies or temporary files
+*.tmp
+*.cache
