@@ -1,0 +1,3 @@
+/Users/manulacooray/SLIIT/GV/cityMaking/city-designer/build/CMakeFiles/city_designer.dir
+/Users/manulacooray/SLIIT/GV/cityMaking/city-designer/build/CMakeFiles/edit_cache.dir
+/Users/manulacooray/SLIIT/GV/cityMaking/city-designer/build/CMakeFiles/rebuild_cache.dir
