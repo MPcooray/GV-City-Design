@@ -41,6 +41,25 @@ const int MAP_H = 256;
 // Grid spacing in pixels on the generated map
 int CELL = 32;
 
+// GUI / CLI options (used by generator)
+enum RoadPattern { ROAD_GRID = 0, ROAD_RADIAL = 1, ROAD_RANDOM = 2 };
+enum SkylineMode { SKY_LOW = 0, SKY_MID = 1, SKY_MIX = 2, SKY_SKY = 3 };
+
+struct Theme { glm::vec3 buildingColor; unsigned char roadR,roadG,roadB; unsigned char parkR,parkG,parkB; };
+static std::vector<Theme> g_themes;
+static int g_road_pattern = ROAD_GRID;
+static int g_skyline_mode = SKY_MID;
+static int g_theme_index = 0;
+static int g_park_radius = 0;
+
+static void initThemes(){
+    if(!g_themes.empty()) return;
+    g_themes.push_back({ glm::vec3(0.85f,0.6f,0.6f), 20,20,20, 34,139,34 }); // Default
+    g_themes.push_back({ glm::vec3(0.7f,0.3f,0.3f), 40,20,20, 60,160,60 }); // Brick
+    g_themes.push_back({ glm::vec3(0.6f,0.7f,0.85f), 25,25,30, 50,180,80 }); // Modern
+    g_themes.push_back({ glm::vec3(0.9f,0.8f,0.6f), 30,30,30, 80,200,120 }); // Pastel
+}
+
 enum Tile { EMPTY=0, ROAD=1, PARK=2, BUILDING=3 };
 static std::vector<int> tileMap; // MAP_W * MAP_H
 // last-generation stats (set by generate_map_custom)
@@ -75,7 +94,9 @@ void draw_thick_road(Image &img,int x0,int y0,int x1,int y1,int halfWidth){
         int cx = p.first, cy = p.second;
         for(int dy=-halfWidth; dy<=halfWidth; ++dy){
             for(int dx=-halfWidth; dx<=halfWidth; ++dx){
-                setPixelAndTile(img, cx+dx, cy+dy, 20,20,20, ROAD);
+                initThemes();
+                Theme &th = g_themes[std::clamp(g_theme_index, 0, (int)g_themes.size()-1)];
+                setPixelAndTile(img, cx+dx, cy+dy, th.roadR,th.roadG,th.roadB, ROAD);
             }
         }
     }
@@ -131,47 +152,107 @@ void generate_map_custom(Image &img, int n_buildings, int n_roads, int n_roundab
     if(vcount <= 0) vcount = 0;
     if(hcount < 0) hcount = 0;
 
-    // Record road positions so we can place roundabouts only at intersections
+    // Record road positions and intersections so we can place roundabouts
     std::vector<int> vxs;
     std::vector<int> vys;
-    for(int i=0;i<vcount;++i){
-        float fx = (float)(i+1) * (float)img.w / (float)(vcount+1);
-        int ix = std::clamp((int)fx, 0, img.w-1);
-        vxs.push_back(ix);
-        draw_thick_road(img, ix, 0, ix, img.h-1, roadHalf);
+    std::vector<std::pair<int,int>> intersections;
+    if(g_road_pattern == ROAD_GRID){
+        for(int i=0;i<vcount;++i){
+            float fx = (float)(i+1) * (float)img.w / (float)(vcount+1);
+            int ix = std::clamp((int)fx, 0, img.w-1);
+            vxs.push_back(ix);
+            draw_thick_road(img, ix, 0, ix, img.h-1, roadHalf);
+        }
+        for(int i=0;i<hcount;++i){
+            float fy = (float)(i+1) * (float)img.h / (float)(hcount+1);
+            int iy = std::clamp((int)fy, 0, img.h-1);
+            vys.push_back(iy);
+            draw_thick_road(img, 0, iy, img.w-1, iy, roadHalf);
+        }
+        // intersections will be detected after all roads are drawn (pixel-level)
+    } else if(g_road_pattern == ROAD_RADIAL){
+        int CXc = CX; int CYc = CY;
+        int spokes = std::max(1, n_roads);
+        float maxR = std::min(img.w, img.h) * 0.5f;
+        for(int i=0;i<spokes;++i){
+            float ang = (float)i / (float)spokes * 2.0f * 3.14159265f;
+            int xend = CXc + (int)(cos(ang) * maxR);
+            int yend = CYc + (int)(sin(ang) * maxR);
+            draw_thick_road(img, CXc, CYc, xend, yend, roadHalf);
+        }
+        // intersections will be detected after all roads are drawn (pixel-level)
+    } else { // ROAD_RANDOM
+        for(int i=0;i<n_roads;++i){
+            int side = rand() % 4;
+            auto randEdgePoint = [&](int s){
+                if(s==0) return std::make_pair(rand()%img.w, 0);
+                if(s==1) return std::make_pair(rand()%img.w, img.h-1);
+                if(s==2) return std::make_pair(0, rand()%img.h);
+                return std::make_pair(img.w-1, rand()%img.h);
+            };
+            auto p1 = randEdgePoint(side);
+            auto p2 = randEdgePoint((side+1 + (rand()%3))%4);
+            draw_thick_road(img, p1.first, p1.second, p2.first, p2.second, roadHalf);
+        }
+        // intersections will be detected after all roads are drawn (pixel-level)
     }
-    for(int i=0;i<hcount;++i){
-        float fy = (float)(i+1) * (float)img.h / (float)(hcount+1);
-        int iy = std::clamp((int)fy, 0, img.h-1);
-        vys.push_back(iy);
-        draw_thick_road(img, 0, iy, img.w-1, iy, roadHalf);
+    // Detect true pixel-level intersections (any pixel that connects roads in two or more directions)
+    // This ensures roundabouts are only placed where two or more roads cross.
+    {
+        std::vector<char> seen(img.w * img.h, 0);
+        const int clusterR = 3; // cluster nearby intersection pixels into a single intersection
+        for(int y=0;y<img.h;++y){
+            for(int x=0;x<img.w;++x){
+                if(tileMap[tileIndex(x,y)] != (int)ROAD) continue;
+                if(seen[tileIndex(x,y)]) continue;
+                bool hasH=false, hasV=false, hasD1=false, hasD2=false;
+                // check neighbors up to radius 2 to handle thick roads
+                for(int r=1;r<=2;++r){
+                    int lx = x - r; if(lx>=0 && tileMap[tileIndex(lx,y)]==(int)ROAD) hasH = true;
+                    int rx = x + r; if(rx<img.w && tileMap[tileIndex(rx,y)]==(int)ROAD) hasH = true;
+                    int uy = y - r; if(uy>=0 && tileMap[tileIndex(x,uy)]==(int)ROAD) hasV = true;
+                    int dy = y + r; if(dy<img.h && tileMap[tileIndex(x,dy)]==(int)ROAD) hasV = true;
+                    int ulx = x - r, uly = y - r; if(ulx>=0 && uly>=0 && tileMap[tileIndex(ulx,uly)]==(int)ROAD) hasD1 = true;
+                    int drx = x + r, dry = y + r; if(drx<img.w && dry<img.h && tileMap[tileIndex(drx,dry)]==(int)ROAD) hasD1 = true;
+                    int urx = x + r, ury = y - r; if(urx<img.w && ury>=0 && tileMap[tileIndex(urx,ury)]==(int)ROAD) hasD2 = true;
+                    int dlx = x - r, dly = y + r; if(dlx>=0 && dly<img.h && tileMap[tileIndex(dlx,dly)]==(int)ROAD) hasD2 = true;
+                }
+                int groups = (int)hasH + (int)hasV + (int)hasD1 + (int)hasD2;
+                if(groups >= 2){
+                    intersections.emplace_back(x,y);
+                    // mark cluster area as seen
+                    for(int cy = std::max(0, y - clusterR); cy <= std::min(img.h-1, y + clusterR); ++cy){
+                        for(int cx = std::max(0, x - clusterR); cx <= std::min(img.w-1, x + clusterR); ++cx){
+                            seen[tileIndex(cx,cy)] = 1;
+                        }
+                    }
+                }
+            }
+        }
     }
 
-    // Roundabouts: only at intersections of vertical and horizontal roads
-    int rr = CELL/2 - 2;
-    int intersectionsCount = (int)vxs.size() * (int)vys.size();
+    // Roundabouts: place using the unified intersections vector
+    int rr = (g_park_radius > 0) ? g_park_radius : (CELL/2 - 2);
+    int intersectionsCount = (int)intersections.size();
     if(n_roundabouts > intersectionsCount){
         std::cout << "Requested " << n_roundabouts << " roundabouts but only " << intersectionsCount << " intersections available; clamping.\n";
         n_roundabouts = intersectionsCount;
     }
-    if(n_roundabouts > 0 && !vxs.empty() && !vys.empty()){
-        // all possible intersections
-        std::vector<std::pair<int,int>> intersections;
-        for(int vx : vxs) for(int hy : vys) intersections.emplace_back(vx, hy);
-
-        // choose up to n_roundabouts intersections
+    if(n_roundabouts > 0 && !intersections.empty()){
         if((int)intersections.size() <= n_roundabouts){
-            for(auto &p : intersections) fill_circle_tile(img, p.first, p.second, rr, 34,139,34, PARK);
+            initThemes();
+            Theme &th = g_themes[std::clamp(g_theme_index, 0, (int)g_themes.size()-1)];
+            for(auto &p : intersections) fill_circle_tile(img, p.first, p.second, rr, th.parkR, th.parkG, th.parkB, PARK);
         } else {
-            // select unique random indices using current rand()/srand seed
             std::vector<int> idx(intersections.size());
             for(size_t i=0;i<idx.size();++i) idx[i] = (int)i;
-            // Fisher-Yates partial shuffle to pick n_roundabouts
             for(int i=0;i<n_roundabouts;++i){
                 int j = i + (rand() % (idx.size() - i));
                 std::swap(idx[i], idx[j]);
                 auto &p = intersections[idx[i]];
-                fill_circle_tile(img, p.first, p.second, rr, 34,139,34, PARK);
+                initThemes();
+                Theme &th = g_themes[std::clamp(g_theme_index, 0, (int)g_themes.size()-1)];
+                fill_circle_tile(img, p.first, p.second, rr, th.parkR, th.parkG, th.parkB, PARK);
             }
         }
     }
@@ -208,9 +289,14 @@ void generate_map_custom(Image &img, int n_buildings, int n_roads, int n_roundab
 
     // Helper: place building marker (big 8×8 blue square)
     auto mark_build = [&](int px, int py){
+        initThemes();
+        Theme &th = g_themes[std::clamp(g_theme_index, 0, (int)g_themes.size()-1)];
+        unsigned char br = (unsigned char)std::min(255.0f, th.buildingColor.r * 255.0f);
+        unsigned char bg = (unsigned char)std::min(255.0f, th.buildingColor.g * 255.0f);
+        unsigned char bb = (unsigned char)std::min(255.0f, th.buildingColor.b * 255.0f);
         for(int dy=-4; dy<=4; ++dy)
             for(int dx=-4; dx<=4; ++dx)
-                setPixelAndTile(img, px + dx, py + dy, 135,206,250, BUILDING);
+                setPixelAndTile(img, px + dx, py + dy, br,bg,bb, BUILDING);
     };
 
     // Place buildings into available cells (randomized order)
@@ -228,6 +314,17 @@ void generate_map_custom(Image &img, int n_buildings, int n_roads, int n_roundab
     }
 
     // Done: if still not placed all, leave as-is (user asked for many buildings)
+}
+
+// write image as simple PPM (ASCII P6) for easy inspection
+static bool write_ppm(const Image &img, const std::string &path){
+    FILE *f = fopen(path.c_str(), "wb");
+    if(!f) return false;
+    // P6 header
+    fprintf(f, "P6\n%d %d\n255\n", img.w, img.h);
+    fwrite(img.data.data(), 1, img.w * img.h * 3, f);
+    fclose(f);
+    return true;
 }
 
 // Fullscreen textured quad shaders (vertex + fragment)
@@ -633,7 +730,8 @@ int main(int argc, char** argv){
     int n_roundabouts = 2;
     unsigned int seed = 0; // 0 => use time
 
-    // Simple flag parsing: --buildings N --roads N --roundabouts N --seed N
+    bool use_gui = false;
+    // Simple flag parsing: --buildings N --roads N --roundabouts N --seed N --gui
     for(int i=1;i<argc;++i){
         std::string a = argv[i];
         if(a == "--buildings" && i+1 < argc){ n_buildings = std::max(0, std::stoi(argv[++i])); }
@@ -641,6 +739,11 @@ int main(int argc, char** argv){
         else if(a == "--roundabouts" && i+1 < argc){ n_roundabouts = std::max(0, std::stoi(argv[++i])); }
         else if(a == "--cell" && i+1 < argc){ CELL = std::max(4, std::stoi(argv[++i])); }
         else if(a == "--seed" && i+1 < argc){ seed = (unsigned)std::stoul(argv[++i]); }
+        else if(a == "--road-pattern" && i+1 < argc){ g_road_pattern = std::clamp(std::stoi(argv[++i]), 0, 2); }
+        else if(a == "--skyline" && i+1 < argc){ g_skyline_mode = std::clamp(std::stoi(argv[++i]), 0, 3); }
+        else if(a == "--theme" && i+1 < argc){ g_theme_index = std::clamp(std::stoi(argv[++i]), 0, 3); }
+        else if(a == "--park-radius" && i+1 < argc){ g_park_radius = std::max(0, std::stoi(argv[++i])); }
+        else if(a == "--gui"){ use_gui = true; }
         else {
             // try positional fallback: buildings roads roundabouts
             if(i == 1) try{ n_buildings = std::max(0, std::stoi(a)); } catch(...){}
@@ -649,12 +752,53 @@ int main(int argc, char** argv){
         }
     }
 
+    // if seed unset -> randomize
     if(seed == 0) seed = (unsigned)time(nullptr);
     srand(seed);
-    std::cout << "Map params -> buildings: " << n_buildings << ", roads: " << n_roads << ", roundabouts: " << n_roundabouts << ", seed: " << seed << "\n";
-    if(!glfwInit()){ std::cerr<<"GLFW init failed\n"; return -1; }
 
-    // Request modern context
+    // If user did not request GUI, run interactive CLI mode: prompt and generate -> write map.ppm
+    if(!use_gui){
+        initThemes();
+        std::cout << "--- City Designer (CLI mode) ---\n";
+        std::cout << "Enter number of buildings (int): ";
+        if(!(std::cin >> n_buildings)) n_buildings = 6;
+
+        std::cout << "Layout size (1=Small 2=Medium 3=Large 4=Custom cell px): ";
+        int layoutSel = 2; if(!(std::cin >> layoutSel)) layoutSel = 2;
+        if(layoutSel == 1) CELL = std::max(4, MAP_W / 8);
+        else if(layoutSel == 2) CELL = std::max(4, MAP_W / 12);
+        else if(layoutSel == 3) CELL = std::max(4, MAP_W / 16);
+        else {
+            std::cout << "Enter cell size in pixels (e.g. 16,32): ";
+            if(!(std::cin >> CELL)) CELL = 32;
+        }
+
+        std::cout << "Road pattern (0=Grid 1=Radial 2=Random): "; if(!(std::cin >> g_road_pattern)) g_road_pattern = 0;
+        std::cout << "Skyline (0=Low 1=Mid 2=Mix 3=Skyscraper): "; if(!(std::cin >> g_skyline_mode)) g_skyline_mode = 1;
+        std::cout << "Theme (0=Default 1=Brick 2=Modern 3=Pastel): "; if(!(std::cin >> g_theme_index)) g_theme_index = 0;
+        std::cout << "Park/Fountain radius in px (0=auto): "; if(!(std::cin >> g_park_radius)) g_park_radius = 0;
+        std::cout << "Number of roads (int): "; if(!(std::cin >> n_roads)) n_roads = 4;
+        std::cout << "Number of roundabouts (int): "; if(!(std::cin >> n_roundabouts)) n_roundabouts = 2;
+        std::cout << "Optional seed (0=random): "; unsigned int inseed = 0; if(!(std::cin >> inseed)) inseed = seed; if(inseed != 0) seed = inseed;
+        srand(seed);
+
+        // generate and write PPM
+        Image ground(MAP_W, MAP_H);
+        generate_map_custom(ground, n_buildings, n_roads, n_roundabouts);
+        const std::string out = "map.ppm";
+        if(write_ppm(ground, out)){
+            std::cout << "Wrote generated map to " << out << "\n";
+            std::cout << "Grid cells available: " << std::max(1, ground.w / CELL) << " x " << std::max(1, ground.h / CELL) << " -> available building cells: " << g_last_available_cells << ", intersections: " << g_last_intersections << "\n";
+            // After CLI generation, automatically open the GUI to show the map
+            use_gui = true;
+        } else {
+            std::cerr << "Failed to write " << out << "\n";
+            return 1;
+        }
+    }
+
+    // Initialize GLFW and request modern context
+    if(!glfwInit()){ std::cerr << "glfwInit() failed\n"; return -1; }
     glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR,3);
     glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR,3);
     glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
