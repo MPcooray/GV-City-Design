@@ -127,6 +127,3 @@ If you'd like, I can:
   Windows/Linux without external package installs.
 
 ---
-
-Good luck — tell me if you want me to add `src/glad/` into the repo or wire up
-`vcpkg` manifest automation.
