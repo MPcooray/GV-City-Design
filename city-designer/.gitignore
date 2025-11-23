@@ -4,3 +4,4 @@ build/
 node_modules/
 dist/
 .vscode/
+city-designer/map.ppm
