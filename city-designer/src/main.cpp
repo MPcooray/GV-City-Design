@@ -8,6 +8,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <ctime>
+#include <string>
 #include <algorithm>
 
 #ifdef __APPLE__
@@ -38,10 +39,13 @@ const int MAP_W = 256;
 const int MAP_H = 256;
 
 // Grid spacing in pixels on the generated map
-const int CELL = 32;
+int CELL = 32;
 
 enum Tile { EMPTY=0, ROAD=1, PARK=2, BUILDING=3 };
 static std::vector<int> tileMap; // MAP_W * MAP_H
+// last-generation stats (set by generate_map_custom)
+static int g_last_available_cells = 0;
+static int g_last_intersections = 0;
 
 inline int tileIndex(int x,int y){ return y*MAP_W + x; }
 
@@ -92,7 +96,10 @@ void fill_circle_tile(Image &img, int cx, int cy, int r, unsigned char rr,unsign
 
 // ---------- small & clear map generator (two roundabouts + ~6 buildings) ----------
 // ---------- clean 2-roundabout + 6-building layout ----------
-void generate_map(Image &img){
+// Parameterized map generator. Produces roads, roundabouts and building markers
+// according to requested counts. The markers are set as BUILDING tiles so the
+// existing placement logic (`init_buildings_from_tiles`) will create 3D blocks.
+void generate_map_custom(Image &img, int n_buildings, int n_roads, int n_roundabouts){
     tileMap.assign(MAP_W * MAP_H, (int)EMPTY);
     for(int y=0;y<img.h;++y)
         for(int x=0;x<img.w;++x)
@@ -102,17 +109,102 @@ void generate_map(Image &img){
     int CX = img.w / 2;
     int CY = img.h / 2;
 
-    // MAIN ROADS
-    draw_thick_road(img, CX - CELL,       0, CX - CELL,       img.h-1, roadHalf);   // left vertical
-    draw_thick_road(img, CX + CELL * 2,   0, CX + CELL * 2,   img.h-1, roadHalf);   // right vertical
-    draw_thick_road(img, 0, CY,           img.w-1, CY,        roadHalf);            // horizontal
+    // compute grid dimensions (cells available for buildings)
+    int gridW = std::max(1, img.w / CELL);
+    int gridH = std::max(1, img.h / CELL);
 
-    // ROUNDABOUTS
+    // Clamp road counts so they don't exceed grid capacity (must leave at least one cell between edges)
+    int vcount = n_roads/2 + (n_roads%2);
+    int hcount = n_roads - vcount;
+    int maxV = std::max(0, gridW - 1);
+    int maxH = std::max(0, gridH - 1);
+    if(vcount > maxV){
+        std::cout << "Clamping vertical road count from " << vcount << " to " << maxV << " (gridW=" << gridW << ")\n";
+        vcount = maxV;
+    }
+    if(hcount > maxH){
+        std::cout << "Clamping horizontal road count from " << hcount << " to " << maxH << " (gridH=" << gridH << ")\n";
+        hcount = maxH;
+    }
+
+    // Ensure non-negative counts after clamping
+    if(vcount <= 0) vcount = 0;
+    if(hcount < 0) hcount = 0;
+
+    // Record road positions so we can place roundabouts only at intersections
+    std::vector<int> vxs;
+    std::vector<int> vys;
+    for(int i=0;i<vcount;++i){
+        float fx = (float)(i+1) * (float)img.w / (float)(vcount+1);
+        int ix = std::clamp((int)fx, 0, img.w-1);
+        vxs.push_back(ix);
+        draw_thick_road(img, ix, 0, ix, img.h-1, roadHalf);
+    }
+    for(int i=0;i<hcount;++i){
+        float fy = (float)(i+1) * (float)img.h / (float)(hcount+1);
+        int iy = std::clamp((int)fy, 0, img.h-1);
+        vys.push_back(iy);
+        draw_thick_road(img, 0, iy, img.w-1, iy, roadHalf);
+    }
+
+    // Roundabouts: only at intersections of vertical and horizontal roads
     int rr = CELL/2 - 2;
-    int rb1x = CX - CELL;
-    int rb2x = CX + CELL * 2;
-    fill_circle_tile(img, rb1x, CY, rr, 34,139,34, PARK);
-    fill_circle_tile(img, rb2x, CY, rr, 34,139,34, PARK);
+    int intersectionsCount = (int)vxs.size() * (int)vys.size();
+    if(n_roundabouts > intersectionsCount){
+        std::cout << "Requested " << n_roundabouts << " roundabouts but only " << intersectionsCount << " intersections available; clamping.\n";
+        n_roundabouts = intersectionsCount;
+    }
+    if(n_roundabouts > 0 && !vxs.empty() && !vys.empty()){
+        // all possible intersections
+        std::vector<std::pair<int,int>> intersections;
+        for(int vx : vxs) for(int hy : vys) intersections.emplace_back(vx, hy);
+
+        // choose up to n_roundabouts intersections
+        if((int)intersections.size() <= n_roundabouts){
+            for(auto &p : intersections) fill_circle_tile(img, p.first, p.second, rr, 34,139,34, PARK);
+        } else {
+            // select unique random indices using current rand()/srand seed
+            std::vector<int> idx(intersections.size());
+            for(size_t i=0;i<idx.size();++i) idx[i] = (int)i;
+            // Fisher-Yates partial shuffle to pick n_roundabouts
+            for(int i=0;i<n_roundabouts;++i){
+                int j = i + (rand() % (idx.size() - i));
+                std::swap(idx[i], idx[j]);
+                auto &p = intersections[idx[i]];
+                fill_circle_tile(img, p.first, p.second, rr, 34,139,34, PARK);
+            }
+        }
+    }
+
+    // After roads and parks are placed, compute available cells for buildings
+    std::vector<std::pair<int,int>> availableCells;
+    for(int gy=0; gy<gridH; ++gy){
+        for(int gx=0; gx<gridW; ++gx){
+            int cx = gx * CELL;
+            int cy = gy * CELL;
+            bool ok = true;
+            for(int yy = std::max(0, cy); yy <= std::min(img.h-1, cy + CELL - 1) && ok; ++yy){
+                for(int xx = std::max(0, cx); xx <= std::min(img.w-1, cx + CELL - 1); ++xx){
+                    int t = tileMap[tileIndex(xx,yy)];
+                    if(t == (int)ROAD || t == (int)PARK){ ok = false; break; }
+                }
+            }
+            if(ok){
+                int px = gx * CELL + CELL/2;
+                int py = gy * CELL + CELL/2;
+                availableCells.emplace_back(px, py);
+            }
+        }
+    }
+
+    if((int)availableCells.size() < n_buildings){
+        std::cout << "Only " << availableCells.size() << " available cells for buildings; clamping requested " << n_buildings << " -> " << availableCells.size() << "\n";
+        n_buildings = (int)availableCells.size();
+    }
+
+    // record stats for the caller
+    g_last_available_cells = (int)availableCells.size();
+    g_last_intersections = intersectionsCount;
 
     // Helper: place building marker (big 8×8 blue square)
     auto mark_build = [&](int px, int py){
@@ -121,24 +213,21 @@ void generate_map(Image &img){
                 setPixelAndTile(img, px + dx, py + dy, 135,206,250, BUILDING);
     };
 
-    // Helper: compute center of a CELL away from roundabout
-    auto off = [&](int ox, int oy, int bx){
-        int px = bx + ox * CELL * 2;   // 2 full cells away → safe from roads
-        int py = CY + oy * CELL * 2;
-        px = (px / CELL) * CELL + CELL/2;
-        py = (py / CELL) * CELL + CELL/2;
-        return std::make_pair(px, py);
-    };
+    // Place buildings into available cells (randomized order)
+    std::vector<int> order((int)availableCells.size());
+    for(size_t i=0;i<order.size();++i) order[i] = (int)i;
+    // shuffle deterministically using rand()
+    for(int i=(int)order.size()-1;i>0;--i){ int j = rand() % (i+1); std::swap(order[i], order[j]); }
+    int placed = 0;
+    for(int oi=0; oi<(int)order.size() && placed < n_buildings; ++oi){
+        int idx = order[oi];
+        int px = availableCells[idx].first;
+        int py = availableCells[idx].second;
+        mark_build(px, py);
+        placed++;
+    }
 
-    // 3 buildings around roundabout 1
-    auto a = off( 0, -1, rb1x); mark_build(a.first, a.second);
-    auto b = off(-1,  0, rb1x); mark_build(b.first, b.second);
-    auto c = off( 0,  1, rb1x); mark_build(c.first, c.second);
-
-    // 3 buildings around roundabout 2
-    auto d = off( 0, -1, rb2x); mark_build(d.first, d.second);
-    auto e = off(+1,  0, rb2x); mark_build(e.first, e.second);
-    auto f = off( 0,  1, rb2x); mark_build(f.first, f.second);
+    // Done: if still not placed all, leave as-is (user asked for many buildings)
 }
 
 // Fullscreen textured quad shaders (vertex + fragment)
@@ -537,7 +626,32 @@ void render_buildings(GLuint cubeProg, GLuint tex){
     glBindVertexArray(0);
 }
 
-int main(){
+int main(int argc, char** argv){
+    // Default parameters
+    int n_buildings = 6;
+    int n_roads = 4;
+    int n_roundabouts = 2;
+    unsigned int seed = 0; // 0 => use time
+
+    // Simple flag parsing: --buildings N --roads N --roundabouts N --seed N
+    for(int i=1;i<argc;++i){
+        std::string a = argv[i];
+        if(a == "--buildings" && i+1 < argc){ n_buildings = std::max(0, std::stoi(argv[++i])); }
+        else if(a == "--roads" && i+1 < argc){ n_roads = std::max(0, std::stoi(argv[++i])); }
+        else if(a == "--roundabouts" && i+1 < argc){ n_roundabouts = std::max(0, std::stoi(argv[++i])); }
+        else if(a == "--cell" && i+1 < argc){ CELL = std::max(4, std::stoi(argv[++i])); }
+        else if(a == "--seed" && i+1 < argc){ seed = (unsigned)std::stoul(argv[++i]); }
+        else {
+            // try positional fallback: buildings roads roundabouts
+            if(i == 1) try{ n_buildings = std::max(0, std::stoi(a)); } catch(...){}
+            else if(i == 2) try{ n_roads = std::max(0, std::stoi(a)); } catch(...){}
+            else if(i == 3) try{ n_roundabouts = std::max(0, std::stoi(a)); } catch(...){}
+        }
+    }
+
+    if(seed == 0) seed = (unsigned)time(nullptr);
+    srand(seed);
+    std::cout << "Map params -> buildings: " << n_buildings << ", roads: " << n_roads << ", roundabouts: " << n_roundabouts << ", seed: " << seed << "\n";
     if(!glfwInit()){ std::cerr<<"GLFW init failed\n"; return -1; }
 
     // Request modern context
@@ -557,7 +671,11 @@ int main(){
 
     // build the CPU map texture
     Image ground(MAP_W, MAP_H);
-    generate_map(ground);
+    generate_map_custom(ground, n_buildings, n_roads, n_roundabouts);
+    // show effective constraints to the user
+    int gridW = std::max(1, ground.w / CELL);
+    int gridH = std::max(1, ground.h / CELL);
+    std::cout << "Grid (cells): " << gridW << " x " << gridH << " -> available building cells: " << g_last_available_cells << ", intersections: " << g_last_intersections << "\n";
 
     // upload texture
     GLuint tex;
@@ -617,6 +735,44 @@ int main(){
         float dt = float(now - lastTime);
         lastTime = now;
         glfwPollEvents();
+
+        // Runtime controls: keyboard-driven parameter adjustments + regenerate
+        static bool lastU=false, lastJ=false, lastI=false, lastK=false;
+        static bool lastO=false, lastL=false, lastG=false;
+        bool pressU = glfwGetKey(win, GLFW_KEY_U) == GLFW_PRESS; // buildings +1
+        bool pressJ = glfwGetKey(win, GLFW_KEY_J) == GLFW_PRESS; // buildings -1
+        bool pressI = glfwGetKey(win, GLFW_KEY_I) == GLFW_PRESS; // roads +1
+        bool pressK = glfwGetKey(win, GLFW_KEY_K) == GLFW_PRESS; // roads -1
+        bool pressO = glfwGetKey(win, GLFW_KEY_O) == GLFW_PRESS; // roundabouts +1
+        bool pressL = glfwGetKey(win, GLFW_KEY_L) == GLFW_PRESS; // roundabouts -1
+        bool pressG = glfwGetKey(win, GLFW_KEY_G) == GLFW_PRESS; // regenerate
+
+        bool paramsChanged = false;
+        if(pressU && !lastU){ n_buildings += 1; paramsChanged = true; }
+        if(pressJ && !lastJ){ n_buildings = std::max(0, n_buildings - 1); paramsChanged = true; }
+        if(pressI && !lastI){ n_roads += 1; paramsChanged = true; }
+        if(pressK && !lastK){ n_roads = std::max(0, n_roads - 1); paramsChanged = true; }
+        if(pressO && !lastO){ n_roundabouts += 1; paramsChanged = true; }
+        if(pressL && !lastL){ n_roundabouts = std::max(0, n_roundabouts - 1); paramsChanged = true; }
+
+        // regenerate if 'G' pressed or params changed
+        bool doRegen = false;
+        if(pressG && !lastG) doRegen = true;
+        if(paramsChanged) doRegen = true;
+
+        lastU = pressU; lastJ = pressJ; lastI = pressI; lastK = pressK;
+        lastO = pressO; lastL = pressL; lastG = pressG;
+
+        if(doRegen){
+            std::cout << "Regenerating map -> buildings: " << n_buildings << ", roads: " << n_roads << ", roundabouts: " << n_roundabouts << "\n";
+            // reseed for deterministic regeneration (same seed + params -> same layout)
+            srand(seed + n_buildings * 73856093u + n_roads * 19349663u + n_roundabouts * 83492791u);
+            generate_map_custom(ground, n_buildings, n_roads, n_roundabouts);
+            // update GPU texture
+            glBindTexture(GL_TEXTURE_2D, tex);
+            glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, ground.w, ground.h, 0, GL_RGB, GL_UNSIGNED_BYTE, ground.data.data());
+            init_buildings_from_tiles(ground);
+        }
 
         // handle toggle T (debounced)
         static bool lastT = false;
