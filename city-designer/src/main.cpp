@@ -65,6 +65,8 @@ static std::vector<int> tileMap; // MAP_W * MAP_H
 // last-generation stats (set by generate_map_custom)
 static int g_last_available_cells = 0;
 static int g_last_intersections = 0;
+// how many roundabouts were actually placed during last generation
+static int g_last_placed_roundabouts = 0;
 
 inline int tileIndex(int x,int y){ return y*MAP_W + x; }
 
@@ -196,29 +198,43 @@ void generate_map_custom(Image &img, int n_buildings, int n_roads, int n_roundab
         }
         // intersections will be detected after all roads are drawn (pixel-level)
     }
-    // Detect true pixel-level intersections (any pixel that connects roads in two or more directions)
-    // This ensures roundabouts are only placed where two or more roads cross.
-    {
+    // For grid road patterns we can deterministically place intersections at the
+    // cartesian product of vertical and horizontal road positions. This avoids
+    // pixel-level detection ambiguities and ensures roundabouts sit exactly at
+    // the grid crossings.
+    if(g_road_pattern == ROAD_GRID && !vxs.empty() && !vys.empty()){
+        intersections.clear();
+        for(auto &vx : vxs){
+            for(auto &vy : vys){
+                intersections.emplace_back(vx, vy);
+            }
+        }
+    }
+    // Detect true pixel-level intersections by ensuring a road extends on both
+    // horizontal sides (left & right) and both vertical sides (up & down).
+    // This reduces false positives from road corners or borders.
+    // Skip pixel-level detection if we already generated intersections from the
+    // grid vxs/vys positions above.
+    if(!(g_road_pattern == ROAD_GRID && !vxs.empty() && !vys.empty())){
         std::vector<char> seen(img.w * img.h, 0);
         const int clusterR = 3; // cluster nearby intersection pixels into a single intersection
+        const int detectR = 4;  // search radius for detecting road continuation
         for(int y=0;y<img.h;++y){
             for(int x=0;x<img.w;++x){
                 if(tileMap[tileIndex(x,y)] != (int)ROAD) continue;
                 if(seen[tileIndex(x,y)]) continue;
-                bool hasH=false, hasV=false, hasD1=false, hasD2=false;
-                // check neighbors up to radius 2 to handle thick roads
-                for(int r=1;r<=2;++r){
-                    int lx = x - r; if(lx>=0 && tileMap[tileIndex(lx,y)]==(int)ROAD) hasH = true;
-                    int rx = x + r; if(rx<img.w && tileMap[tileIndex(rx,y)]==(int)ROAD) hasH = true;
-                    int uy = y - r; if(uy>=0 && tileMap[tileIndex(x,uy)]==(int)ROAD) hasV = true;
-                    int dy = y + r; if(dy<img.h && tileMap[tileIndex(x,dy)]==(int)ROAD) hasV = true;
-                    int ulx = x - r, uly = y - r; if(ulx>=0 && uly>=0 && tileMap[tileIndex(ulx,uly)]==(int)ROAD) hasD1 = true;
-                    int drx = x + r, dry = y + r; if(drx<img.w && dry<img.h && tileMap[tileIndex(drx,dry)]==(int)ROAD) hasD1 = true;
-                    int urx = x + r, ury = y - r; if(urx<img.w && ury>=0 && tileMap[tileIndex(urx,ury)]==(int)ROAD) hasD2 = true;
-                    int dlx = x - r, dly = y + r; if(dlx>=0 && dly<img.h && tileMap[tileIndex(dlx,dly)]==(int)ROAD) hasD2 = true;
+
+                bool left=false, right=false, up=false, down=false;
+                for(int r=1; r<=detectR; ++r){
+                    int lx = x - r; if(lx>=0 && tileMap[tileIndex(lx,y)]==(int)ROAD) left = true;
+                    int rx = x + r; if(rx<img.w && tileMap[tileIndex(rx,y)]==(int)ROAD) right = true;
+                    int uy = y - r; if(uy>=0 && tileMap[tileIndex(x,uy)]==(int)ROAD) up = true;
+                    int dy = y + r; if(dy<img.h && tileMap[tileIndex(x,dy)]==(int)ROAD) down = true;
+                    if(left && right && up && down) break;
                 }
-                int groups = (int)hasH + (int)hasV + (int)hasD1 + (int)hasD2;
-                if(groups >= 2){
+
+                // require road continuity on both sides horizontally AND vertically
+                if(left && right && up && down){
                     intersections.emplace_back(x,y);
                     // mark cluster area as seen
                     for(int cy = std::max(0, y - clusterR); cy <= std::min(img.h-1, y + clusterR); ++cy){
@@ -232,6 +248,8 @@ void generate_map_custom(Image &img, int n_buildings, int n_roads, int n_roundab
     }
 
     // Roundabouts: place using the unified intersections vector
+    // record requested value so we can report how many were actually placed
+    int requested_roundabouts = n_roundabouts;
     int rr = (g_park_radius > 0) ? g_park_radius : (CELL/2 - 2);
     int intersectionsCount = (int)intersections.size();
     if(n_roundabouts > intersectionsCount){
@@ -242,7 +260,9 @@ void generate_map_custom(Image &img, int n_buildings, int n_roads, int n_roundab
         if((int)intersections.size() <= n_roundabouts){
             initThemes();
             Theme &th = g_themes[std::clamp(g_theme_index, 0, (int)g_themes.size()-1)];
-            for(auto &p : intersections) fill_circle_tile(img, p.first, p.second, rr, th.parkR, th.parkG, th.parkB, PARK);
+            for(auto &p : intersections){
+                fill_circle_tile(img, p.first, p.second, rr, th.parkR, th.parkG, th.parkB, PARK);
+            }
         } else {
             std::vector<int> idx(intersections.size());
             for(size_t i=0;i<idx.size();++i) idx[i] = (int)i;
@@ -256,6 +276,9 @@ void generate_map_custom(Image &img, int n_buildings, int n_roads, int n_roundab
             }
         }
     }
+
+    // how many roundabouts were actually placed (post-clamp)
+    g_last_placed_roundabouts = n_roundabouts;
 
     // After roads and parks are placed, compute available cells for buildings
     std::vector<std::pair<int,int>> availableCells;
@@ -786,9 +809,9 @@ int main(int argc, char** argv){
         Image ground(MAP_W, MAP_H);
         generate_map_custom(ground, n_buildings, n_roads, n_roundabouts);
         const std::string out = "map.ppm";
-        if(write_ppm(ground, out)){
+            if(write_ppm(ground, out)){
             std::cout << "Wrote generated map to " << out << "\n";
-            std::cout << "Grid cells available: " << std::max(1, ground.w / CELL) << " x " << std::max(1, ground.h / CELL) << " -> available building cells: " << g_last_available_cells << ", intersections: " << g_last_intersections << "\n";
+            std::cout << "Grid cells available: " << std::max(1, ground.w / CELL) << " x " << std::max(1, ground.h / CELL) << " -> available building cells: " << g_last_available_cells << ", intersections: " << g_last_intersections << ", roundabouts placed: " << g_last_placed_roundabouts << " (requested: " << n_roundabouts << ")\n";
             // After CLI generation, automatically open the GUI to show the map
             use_gui = true;
         } else {
@@ -819,7 +842,7 @@ int main(int argc, char** argv){
     // show effective constraints to the user
     int gridW = std::max(1, ground.w / CELL);
     int gridH = std::max(1, ground.h / CELL);
-    std::cout << "Grid (cells): " << gridW << " x " << gridH << " -> available building cells: " << g_last_available_cells << ", intersections: " << g_last_intersections << "\n";
+    std::cout << "Grid (cells): " << gridW << " x " << gridH << " -> available building cells: " << g_last_available_cells << ", intersections: " << g_last_intersections << ", roundabouts placed: " << g_last_placed_roundabouts << " (requested: " << n_roundabouts << ")\n";
 
     // upload texture
     GLuint tex;
@@ -949,6 +972,15 @@ int main(int argc, char** argv){
         glfwGetFramebufferSize(win, &ww, &hh);
         windowW = ww; windowH = hh;
         updateCameraMatrices();
+
+        // Update the GLFW window title with live stats so the user can see
+        // requested vs placed roundabouts (simple on-screen overlay via title).
+        {
+            char titleBuf[256];
+            snprintf(titleBuf, sizeof(titleBuf), "City Designer - roundabouts placed: %d (requested: %d) | buildings: %d | roads: %d",
+                     g_last_placed_roundabouts, n_roundabouts, n_buildings, n_roads);
+            glfwSetWindowTitle(win, titleBuf);
+        }
 
         // Render
         glViewport(0,0,ww,hh);
