@@ -1,7 +1,3 @@
-// src/main.cpp
-// Full updated main.cpp (with fixes for building placement & 2D markers)
-// NOTE: removed 'glad' usage per your request — using system OpenGL headers.
-
 #include <iostream>
 #include <vector>
 #include <cstdint>
@@ -16,8 +12,6 @@
   #include <OpenGL/gl3.h>
   #include <OpenGL/gl3ext.h>
 #else
-  // If you're on Linux/Windows and not using GLAD, ensure your build provides a loader
-  // (GLEW/OS-specific). This includes a generic header fallback; replace if you use GLEW.
   #include <GL/gl.h>
 #endif
 
@@ -161,7 +155,6 @@ void fill_circle_tile(Image &img, int cx, int cy, int r, unsigned char rr,unsign
     }
 }
 
-// ---------- small & clear map generator (two roundabouts + ~6 buildings) ----------
 // ---------- clean 2-roundabout + 6-building layout ----------
 // Parameterized map generator. Produces roads, roundabouts and building markers
 // according to requested counts. The markers are set as BUILDING tiles so the
@@ -437,7 +430,6 @@ void generate_map_custom(Image &img, int n_buildings, int n_roads, int n_roundab
         placed++;
     }
 
-    // Done: if still not placed all, leave as-is (user asked for many buildings)
 }
 
 // write image as simple PPM (ASCII P6) for easy inspection
@@ -985,9 +977,7 @@ int main(int argc, char** argv){
     if(!win){ std::cerr<<"Window create failed\n"; glfwTerminate(); return -1; }
     glfwMakeContextCurrent(win);
 
-    // NOTE: glad loader call was intentionally removed per your setup.
-    // If you run on non-Apple OS and you need a loader, ensure you call your loader here.
-
+    // Initialize GLEW
     // Load textures from assets folder
     std::cout << "Loading textures...\n";
     g_buildingTexture = loadTexture("assets/building.jpg");
