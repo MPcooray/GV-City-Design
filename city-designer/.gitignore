@@ -1,0 +1,7 @@
+build/
+.ds_Store
+.env
+node_modules/
+dist/
+.vscode/
+map.ppm
