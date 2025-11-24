@@ -27,6 +27,10 @@
 #include "circle.h"
 #include "shader.h"
 
+// stb_image for texture loading
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 // GLM (header-only)
 #include <glm/glm.hpp>
 #include <glm/gtc/matrix_transform.hpp>
@@ -67,6 +71,46 @@ static int g_last_available_cells = 0;
 static int g_last_intersections = 0;
 // how many roundabouts were actually placed during last generation
 static int g_last_placed_roundabouts = 0;
+
+// Texture IDs for buildings and roads
+static GLuint g_buildingTexture = 0;
+static GLuint g_roadTexture = 0;
+
+// Texture loading helper
+GLuint loadTexture(const char* path) {
+    int w, h, channels;
+    unsigned char* data = stbi_load(path, &w, &h, &channels, 3); // force RGB
+    
+    // If failed, try parent directory (for when running from build/)
+    if (!data) {
+        std::string parentPath = std::string("../") + path;
+        data = stbi_load(parentPath.c_str(), &w, &h, &channels, 3);
+        if (data) {
+            std::cout << "Loaded texture: " << parentPath << " (" << w << "x" << h << ")\n";
+        }
+    } else {
+        std::cout << "Loaded texture: " << path << " (" << w << "x" << h << ")\n";
+    }
+    
+    if (!data) {
+        std::cerr << "Failed to load texture: " << path << " (tried ../" << path << " too)\n";
+        return 0;
+    }
+    
+    GLuint tex;
+    glGenTextures(1, &tex);
+    glBindTexture(GL_TEXTURE_2D, tex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, w, h, 0, GL_RGB, GL_UNSIGNED_BYTE, data);
+    glGenerateMipmap(GL_TEXTURE_2D);
+    
+    stbi_image_free(data);
+    return tex;
+}
 
 inline int tileIndex(int x,int y){ return y*MAP_W + x; }
 
@@ -461,24 +505,57 @@ in vec3 vNormal;
 in vec2 faceUV;
 out vec4 FragColor;
 uniform sampler2D uTex;
+uniform sampler2D uTileMap;
+uniform sampler2D uBuildingTex;
+uniform sampler2D uRoadTex;
 uniform float groundWidth;
 uniform float groundDepth;
 uniform int isGround;
 uniform vec3 lightDir;
 uniform vec3 buildingColor;
+uniform int useTextures;  // 0=color only, 1=use textures
 void main(){
     vec3 color;
     if(isGround == 1){
         float u = (worldPos.x / groundWidth) + 0.5;
         float v = (worldPos.z / groundDepth) + 0.5;
-        color = texture(uTex, vec2(u, v)).rgb;
+        vec3 groundColor = texture(uTex, vec2(u, v)).rgb;
+        
+        // If using textures, use tile map to determine where to apply road texture
+        if(useTextures == 1) {
+            // Sample tile map to get tile type (0=EMPTY, 1=ROAD, 2=PARK, 3=BUILDING)
+            float tileType = texture(uTileMap, vec2(u, v)).r * 255.0;
+            
+            // Sample road texture with tiling for detail
+            vec3 roadColor = texture(uRoadTex, vec2(u * 10.0, v * 10.0)).rgb;
+            
+            // Apply road texture only on ROAD tiles (type 1)
+            if(tileType > 0.5 && tileType < 1.5) {
+                // This is a road tile
+                color = roadColor * 0.85;  // Slightly darken for realism
+            } else {
+                // Not a road, use original ground color
+                color = groundColor;
+            }
+        } else {
+            color = groundColor;
+        }
     } else {
-        vec3 base = buildingColor;
-        // small window-dot pattern using faceUV
-        float wx = fract(faceUV.x * 6.0);
-        float wy = fract(faceUV.y * 6.0);
-        float dotPattern = step(0.85, wx) * step(0.85, wy);
-        color = mix(base, base * vec3(0.55,0.55,0.6), dotPattern);
+        vec3 base;
+        if(useTextures == 1){
+            // Sample building texture with proper tiling
+            base = texture(uBuildingTex, faceUV * 3.0).rgb;
+            // Slight blend with building color for variation (70% texture, 30% tint)
+            base = mix(base, base * buildingColor, 0.25);
+        } else {
+            base = buildingColor;
+            // small window-dot pattern using faceUV
+            float wx = fract(faceUV.x * 6.0);
+            float wy = fract(faceUV.y * 6.0);
+            float dotPattern = step(0.85, wx) * step(0.85, wy);
+            base = mix(base, base * vec3(0.55,0.55,0.6), dotPattern);
+        }
+        color = base;
     }
     // lighting using actual normal
     vec3 n = normalize(vNormal);
@@ -775,11 +852,29 @@ void init_buildings_from_tiles(const Image &ground){
 }
 
 
-void render_buildings(GLuint cubeProg, GLuint tex){
+void render_buildings(GLuint cubeProg, GLuint tex, GLuint tileMapTex){
     glUseProgram(cubeProg);
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_2D, tex);
     glUniform1i(glGetUniformLocation(cubeProg,"uTex"), 0);
+    
+    // Bind tile map texture
+    glActiveTexture(GL_TEXTURE1);
+    glBindTexture(GL_TEXTURE_2D, tileMapTex);
+    glUniform1i(glGetUniformLocation(cubeProg,"uTileMap"), 1);
+    
+    // Bind building texture
+    glActiveTexture(GL_TEXTURE2);
+    glBindTexture(GL_TEXTURE_2D, g_buildingTexture);
+    glUniform1i(glGetUniformLocation(cubeProg,"uBuildingTex"), 2);
+    
+    // Bind road texture
+    glActiveTexture(GL_TEXTURE3);
+    glBindTexture(GL_TEXTURE_2D, g_roadTexture);
+    glUniform1i(glGetUniformLocation(cubeProg,"uRoadTex"), 3);
+    
+    // Enable textures if they loaded successfully
+    glUniform1i(glGetUniformLocation(cubeProg,"useTextures"), (g_buildingTexture && g_roadTexture) ? 1 : 0);
 
     glm::vec3 lightDir = glm::normalize(glm::vec3(-1.0f, -1.0f, -0.3f));
     glUniform3fv(glGetUniformLocation(cubeProg,"lightDir"), 1, glm::value_ptr(lightDir));
@@ -893,6 +988,15 @@ int main(int argc, char** argv){
     // NOTE: glad loader call was intentionally removed per your setup.
     // If you run on non-Apple OS and you need a loader, ensure you call your loader here.
 
+    // Load textures from assets folder
+    std::cout << "Loading textures...\n";
+    g_buildingTexture = loadTexture("assets/building.jpg");
+    g_roadTexture = loadTexture("assets/road.jpg");
+    bool texturesLoaded = (g_buildingTexture != 0 && g_roadTexture != 0);
+    if(!texturesLoaded) {
+        std::cout << "Warning: Textures not loaded. Using procedural colors instead.\n";
+    }
+
     // build the CPU map texture
     Image ground(MAP_W, MAP_H);
     generate_map_custom(ground, n_buildings, n_roads, n_roundabouts);
@@ -909,6 +1013,20 @@ int main(int argc, char** argv){
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
     glPixelStorei(GL_UNPACK_ALIGNMENT,1);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB8, ground.w, ground.h, 0, GL_RGB, GL_UNSIGNED_BYTE, ground.data.data());
+
+    // Create tile map texture (single channel, stores tile type: 0=EMPTY, 1=ROAD, 2=PARK, 3=BUILDING)
+    GLuint tileMapTex;
+    std::vector<unsigned char> tileMapData(MAP_W * MAP_H);
+    for(int i = 0; i < MAP_W * MAP_H; ++i) {
+        tileMapData[i] = (unsigned char)tileMap[i];
+    }
+    glGenTextures(1, &tileMapTex);
+    glBindTexture(GL_TEXTURE_2D, tileMapTex);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_R8, MAP_W, MAP_H, 0, GL_RED, GL_UNSIGNED_BYTE, tileMapData.data());
 
     // fullscreen quad setup
     float quadVerts[] = {
@@ -1061,6 +1179,24 @@ int main(int argc, char** argv){
             glActiveTexture(GL_TEXTURE0);
             glBindTexture(GL_TEXTURE_2D, tex);
             glUniform1i(glGetUniformLocation(cubeProg,"uTex"), 0);
+            
+            // Bind tile map texture
+            glActiveTexture(GL_TEXTURE1);
+            glBindTexture(GL_TEXTURE_2D, tileMapTex);
+            glUniform1i(glGetUniformLocation(cubeProg,"uTileMap"), 1);
+            
+            // Bind building texture
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, g_buildingTexture);
+            glUniform1i(glGetUniformLocation(cubeProg,"uBuildingTex"), 2);
+            
+            // Bind road texture
+            glActiveTexture(GL_TEXTURE3);
+            glBindTexture(GL_TEXTURE_2D, g_roadTexture);
+            glUniform1i(glGetUniformLocation(cubeProg,"uRoadTex"), 3);
+            
+            // Enable textures if they loaded successfully
+            glUniform1i(glGetUniformLocation(cubeProg,"useTextures"), (g_buildingTexture && g_roadTexture) ? 1 : 0);
 
             // ground as a very flat scaled cube centered at origin
             glm::mat4 Mground = glm::translate(glm::mat4(1.0f), glm::vec3(0.0f, -0.01f, 0.0f));
@@ -1083,7 +1219,7 @@ int main(int argc, char** argv){
             glDrawElements(GL_TRIANGLES, cubeMesh.indexCount, GL_UNSIGNED_INT, 0);
 
             // render buildings
-            render_buildings(cubeProg, tex);
+            render_buildings(cubeProg, tex, tileMapTex);
             glBindVertexArray(0);
         }
 
@@ -1100,6 +1236,9 @@ int main(int argc, char** argv){
     glDeleteBuffers(1,&cubeMesh.EBO);
     glDeleteVertexArrays(1,&cubeMesh.VAO);
     glDeleteTextures(1,&tex);
+    glDeleteTextures(1,&tileMapTex);
+    if(g_buildingTexture) glDeleteTextures(1, &g_buildingTexture);
+    if(g_roadTexture) glDeleteTextures(1, &g_roadTexture);
 
     glfwDestroyWindow(win);
     glfwTerminate();
