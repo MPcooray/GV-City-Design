@@ -15,7 +15,7 @@ See the assignment PDF uploaded: /mnt/data/Assignment_Release.pdf
 # City Designer - Part 1 (Modern OpenGL starter)
 
 This small C++/OpenGL project uses CMake and GLFW. The `CMakeLists.txt` already
-handles macOS Homebrew paths and will copy the `assets/` folder into the build
+handles macOS Homebrew paths and will copy the `assets/` folder into the builds & roads- Line(//967)
 directory so the executable can access runtime assets.
 
 **This README shows step-by-step setup and build instructions for macOS and
