@@ -121,9 +121,4 @@ build\\bin\\city_designer.exe # Windows (PowerShell / cmd)
   to place the executable into `build/bin/`.
 - `CMakeLists.txt` links system frameworks on macOS and `opengl32` on Windows.
 
-If you'd like, I can:
-- Add a `vcpkg.json` manifest for easy reproducible installs.
-- Add `glad` sources under `src/glad/` so the repo builds out-of-the-box on
-  Windows/Linux without external package installs.
-
 ---
